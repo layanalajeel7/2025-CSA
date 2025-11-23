@@ -120,19 +120,26 @@ func distributor(p Params, c distributorChannels) {
 		strconv.Itoa(p.ImageHeight) + "x" +
 		strconv.Itoa(finalTurn)
 
+	// Output the final PGM image (required by Stage 3)
 	c.ioCommand <- ioOutput
 	c.ioFilename <- outputName
-
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
 			c.ioOutput <- finalWorld[y][x]
 		}
 	}
 
+	// Wait for IO to finish writing
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
 
-	// Build final alive list for FinalTurnComplete
+	// ⭐ Stage 3 required event
+	c.events <- ImageOutputComplete{
+		CompletedTurns: finalTurn,
+		Filename:       outputName,
+	}
+
+	// Build final alive list
 	var alive []util.Cell
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
@@ -141,6 +148,8 @@ func distributor(p Params, c distributorChannels) {
 			}
 		}
 	}
+
+	// Notify test harness that the simulation is complete
 	c.events <- FinalTurnComplete{
 		CompletedTurns: finalTurn,
 		Alive:          alive,
@@ -151,9 +160,9 @@ func distributor(p Params, c distributorChannels) {
 		NewState:       Quitting,
 	}
 
-	// stop the ticker goroutine
+	// stop ticker
 	close(done)
 
+	// close events channel
 	close(c.events)
-
 }
