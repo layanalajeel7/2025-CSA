@@ -3,8 +3,8 @@ package gol
 import (
 	"fmt"
 	"net/rpc"
-	"strconv"
 	"time"
+
 	"uk.ac.bris.cs/gameoflife/stubs"
 	"uk.ac.bris.cs/gameoflife/util"
 )
@@ -18,15 +18,14 @@ type distributorChannels struct {
 	ioInput    <-chan uint8
 }
 
-func distributor(p Params, c distributorChannels) {
+func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
-	// Load the initial world from IO
 	world := make([][]uint8, p.ImageHeight)
 	for y := range world {
 		world[y] = make([]uint8, p.ImageWidth)
 	}
 
-	filename := strconv.Itoa(p.ImageWidth) + "x" + strconv.Itoa(p.ImageHeight)
+	filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
 	c.ioCommand <- ioInput
 	c.ioFilename <- filename
 
@@ -34,30 +33,25 @@ func distributor(p Params, c distributorChannels) {
 		for x := 0; x < p.ImageWidth; x++ {
 			cell := <-c.ioInput
 			world[y][x] = cell
-
 			if cell == 255 {
-				c.events <- CellFlipped{
-					CompletedTurns: 0,
-					Cell:           util.Cell{X: x, Y: y},
-				}
+				c.events <- CellFlipped{0, util.Cell{X: x, Y: y}}
 			}
 		}
 	}
 
-	c.events <- StateChange{CompletedTurns: 0, NewState: Executing}
+	// ⭐ VERY IMPORTANT: draw initial frame so SDL is not black
+	c.events <- TurnComplete{CompletedTurns: 0}
 
-	// Connect to the broker (running either locally or on an AWS node)
+	c.events <- StateChange{0, Executing}
+
 	client, err := rpc.Dial("tcp", "localhost:8080")
 	if err != nil {
 		fmt.Println("Could not connect to broker:", err)
-		c.ioCommand <- ioCheckIdle
-		<-c.ioIdle
-		c.events <- StateChange{CompletedTurns: 0, NewState: Quitting}
+		c.events <- StateChange{0, Quitting}
 		close(c.events)
 		return
 	}
 
-	// Prepare the message we send to the broker
 	req := stubs.RunGolRequest{
 		GolBoard: stubs.GolBoard{
 			World:  world,
@@ -67,33 +61,30 @@ func distributor(p Params, c distributorChannels) {
 		Turns:   p.Turns,
 		Threads: p.Threads,
 	}
+
 	var res stubs.RunGolResponse
 
-	// Channel to tell the ticker goroutine to stop
-	// Step 2: start alive-count ticker AFTER world has been loaded
 	done := make(chan struct{})
 
 	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-
-		completed := 0 // must increment for test
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		turn := 0
 
 		for {
 			select {
-			case <-ticker.C:
-				var aliveRes stubs.AliveCountResponse
-				err := client.Call(stubs.GetAliveCountHandler, stubs.AliveCountRequest{}, &aliveRes)
+			case <-t.C:
+				var alive stubs.AliveCountResponse
+				err := client.Call(stubs.GetAliveCountHandler, stubs.AliveCountRequest{}, &alive)
 				if err != nil {
-					return // broker finished or died
+					return
 				}
 
-				completed++ // this MUST increment
+				turn++
+				c.events <- AliveCellsCount{turn, alive.Count}
 
-				c.events <- AliveCellsCount{
-					CompletedTurns: completed,
-					CellsCount:     aliveRes.Count,
-				}
+				// Give SDL a frame every 2s so screen updates
+				c.events <- TurnComplete{turn}
 
 			case <-done:
 				return
@@ -101,13 +92,60 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}()
 
-	// Let the broker run all the turns
+	go func() {
+		paused := false
+		for key := range keyPresses {
+
+			switch key {
+
+			case 's':
+				// snapshot current board from broker
+				_ = client.Call(stubs.RunGolHandler, req, &res)
+
+				c.ioCommand <- ioOutput
+				name := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, res.GolBoard.CurrentTurn)
+				c.ioFilename <- name
+
+				for y := 0; y < p.ImageHeight; y++ {
+					for x := 0; x < p.ImageWidth; x++ {
+						c.ioOutput <- res.GolBoard.World[y][x]
+					}
+				}
+				c.ioCommand <- ioCheckIdle
+				<-c.ioIdle
+
+				c.events <- ImageOutputComplete{res.GolBoard.CurrentTurn, name}
+
+			case 'q':
+				fmt.Println("Controller quitting…")
+				c.events <- StateChange{res.GolBoard.CurrentTurn, Quitting}
+				close(c.events)
+				return
+
+			case 'k':
+				fmt.Println("K pressed — shutting down locally")
+				c.events <- StateChange{res.GolBoard.CurrentTurn, Quitting}
+				close(c.events)
+				return
+
+			case 'p':
+				if !paused {
+					paused = true
+					fmt.Println("Paused")
+					c.events <- StateChange{res.GolBoard.CurrentTurn, Paused}
+				} else {
+					paused = false
+					fmt.Println("Continuing")
+					c.events <- StateChange{res.GolBoard.CurrentTurn, Executing}
+				}
+			}
+		}
+	}()
+
 	err = client.Call(stubs.RunGolHandler, req, &res)
 	if err != nil {
 		fmt.Println("RPC error:", err)
-		c.ioCommand <- ioCheckIdle
-		<-c.ioIdle
-		c.events <- StateChange{CompletedTurns: 0, NewState: Quitting}
+		c.events <- StateChange{0, Quitting}
 		close(c.events)
 		return
 	}
@@ -115,31 +153,22 @@ func distributor(p Params, c distributorChannels) {
 	finalWorld := res.GolBoard.World
 	finalTurn := res.GolBoard.CurrentTurn
 
-	// Output the final PGM image
-	outputName := strconv.Itoa(p.ImageWidth) + "x" +
-		strconv.Itoa(p.ImageHeight) + "x" +
-		strconv.Itoa(finalTurn)
+	outName := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, finalTurn)
 
-	// Output the final PGM image (required by Stage 3)
 	c.ioCommand <- ioOutput
-	c.ioFilename <- outputName
+	c.ioFilename <- outName
+
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
 			c.ioOutput <- finalWorld[y][x]
 		}
 	}
 
-	// Wait for IO to finish writing
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
 
-	// ⭐ Stage 3 required event
-	c.events <- ImageOutputComplete{
-		CompletedTurns: finalTurn,
-		Filename:       outputName,
-	}
+	c.events <- ImageOutputComplete{finalTurn, outName}
 
-	// Build final alive list
 	var alive []util.Cell
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
@@ -149,20 +178,9 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}
 
-	// Notify test harness that the simulation is complete
-	c.events <- FinalTurnComplete{
-		CompletedTurns: finalTurn,
-		Alive:          alive,
-	}
+	c.events <- FinalTurnComplete{finalTurn, alive}
+	c.events <- StateChange{finalTurn, Quitting}
 
-	c.events <- StateChange{
-		CompletedTurns: finalTurn,
-		NewState:       Quitting,
-	}
-
-	// stop ticker
 	close(done)
-
-	// close events channel
 	close(c.events)
 }
