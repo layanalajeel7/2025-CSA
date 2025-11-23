@@ -16,49 +16,52 @@ type Broker struct {
 
 // countNeighbours checks 8 neighbours with toroidal wrapping.
 func countNeighbours(world [][]uint8, x, y, w, h int) int {
-	n := 0
-	for dy := -1; dy <= 1; dy++ {
-		for dx := -1; dx <= 1; dx++ {
-			if dx == 0 && dy == 0 {
+	alive := 0
+
+	for j := -1; j <= 1; j++ {
+		for i := -1; i <= 1; i++ {
+			if i == 0 && j == 0 {
 				continue
 			}
-			ny := (y + dy + h) % h
-			nx := (x + dx + w) % w
+			ny := (y + j + h) % h
+			nx := (x + i + w) % w
+
 			if world[ny][nx] == 255 {
-				n++
+				alive++
 			}
 		}
 	}
-	return n
+
+	return alive
 }
 
 // applyRules is the "secret" GOL logic
 func applyRules(world [][]uint8, turns int) [][]uint8 {
 	h := len(world)
-	if h == 0 {
-		return world
-	}
 	w := len(world[0])
 
 	curr := world
 
 	for t := 0; t < turns; t++ {
-
 		next := make([][]uint8, h)
-		for y := range next {
+		for y := 0; y < h; y++ {
 			next[y] = make([]uint8, w)
-			for x := 0; x < w; x++ {
-				a := countNeighbours(curr, x, y, w, h)
-				c := curr[y][x]
+		}
 
-				if c == 255 {
-					if a == 2 || a == 3 {
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+
+				neighbours := countNeighbours(curr, x, y, w, h)
+				cell := curr[y][x]
+
+				if cell == 255 {
+					if neighbours == 2 || neighbours == 3 {
 						next[y][x] = 255
 					} else {
 						next[y][x] = 0
 					}
 				} else {
-					if a == 3 {
+					if neighbours == 3 {
 						next[y][x] = 255
 					} else {
 						next[y][x] = 0
@@ -82,10 +85,13 @@ func (b *Broker) RunGol(req stubs.RunGolRequest, res *stubs.RunGolResponse) erro
 		return errors.New("empty world received by broker")
 	}
 
-	// Compute the final world after all turns
+	// important: store initial board for early alive counts
+	b.currentBoard = req.GolBoard
+
+	// run all turns
 	finalWorld := applyRules(req.GolBoard.World, req.Turns)
 
-	// SAVE IT INTO THE BROKER so GetAliveCount can read it
+	// update broker board
 	b.currentBoard = stubs.GolBoard{
 		World:       finalWorld,
 		Width:       req.GolBoard.Width,
@@ -93,7 +99,7 @@ func (b *Broker) RunGol(req stubs.RunGolRequest, res *stubs.RunGolResponse) erro
 		CurrentTurn: req.Turns,
 	}
 
-	// Return same board to client
+	// return final world to client
 	res.GolBoard = b.currentBoard
 
 	return nil

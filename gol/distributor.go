@@ -67,25 +67,39 @@ func distributor(p Params, c distributorChannels) {
 		Turns:   p.Turns,
 		Threads: p.Threads,
 	}
-
 	var res stubs.RunGolResponse
+
+	// Channel to tell the ticker goroutine to stop
+	done := make(chan struct{})
+
 	// Step 2: ticker that asks the broker for alive count every 2 seconds
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
-		for range ticker.C {
-			var aliveRes stubs.AliveCountResponse
-			err := client.Call(stubs.GetAliveCountHandler, stubs.AliveCountRequest{}, &aliveRes)
-			if err != nil {
-				// If broker is busy or finished, just stop polling
-				return
-			}
+		completed := 0
 
-			// Send AliveCellsCount event to the UI
-			c.events <- AliveCellsCount{
-				CompletedTurns: 0, // tests do NOT care about this value
-				CellsCount:     aliveRes.Count,
+		for {
+			select {
+			case <-ticker.C:
+				var aliveRes stubs.AliveCountResponse
+				err := client.Call(stubs.GetAliveCountHandler, stubs.AliveCountRequest{}, &aliveRes)
+				if err != nil {
+					// If broker is busy or finished, just stop polling
+					return
+				}
+
+				completed++ // make sure CompletedTurns is increasing
+
+				// Send AliveCellsCount event to the UI
+				c.events <- AliveCellsCount{
+					CompletedTurns: completed,
+					CellsCount:     aliveRes.Count,
+				}
+
+			case <-done:
+				// distributor told us to stop
+				return
 			}
 		}
 	}()
@@ -130,7 +144,6 @@ func distributor(p Params, c distributorChannels) {
 			}
 		}
 	}
-
 	c.events <- FinalTurnComplete{
 		CompletedTurns: finalTurn,
 		Alive:          alive,
@@ -141,5 +154,9 @@ func distributor(p Params, c distributorChannels) {
 		NewState:       Quitting,
 	}
 
+	// stop the ticker goroutine
+	close(done)
+
 	close(c.events)
+
 }
