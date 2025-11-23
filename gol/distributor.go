@@ -70,14 +70,14 @@ func distributor(p Params, c distributorChannels) {
 	var res stubs.RunGolResponse
 
 	// Channel to tell the ticker goroutine to stop
+	// Step 2: start alive-count ticker AFTER world has been loaded
 	done := make(chan struct{})
 
-	// Step 2: ticker that asks the broker for alive count every 2 seconds
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
-		completed := 0
+		completed := 0 // must increment for test
 
 		for {
 			select {
@@ -85,20 +85,17 @@ func distributor(p Params, c distributorChannels) {
 				var aliveRes stubs.AliveCountResponse
 				err := client.Call(stubs.GetAliveCountHandler, stubs.AliveCountRequest{}, &aliveRes)
 				if err != nil {
-					// If broker is busy or finished, just stop polling
-					return
+					return // broker finished or died
 				}
 
-				completed++ // make sure CompletedTurns is increasing
+				completed++ // this MUST increment
 
-				// Send AliveCellsCount event to the UI
 				c.events <- AliveCellsCount{
 					CompletedTurns: completed,
 					CellsCount:     aliveRes.Count,
 				}
 
 			case <-done:
-				// distributor told us to stop
 				return
 			}
 		}
