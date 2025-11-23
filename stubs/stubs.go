@@ -1,9 +1,7 @@
 package stubs
 
-// RPC function names (kept short)
 const RunGolHandler = "Broker.RunGol"
 
-// structure passed to the worker node
 type GolBoard struct {
 	World       [][]uint8
 	Width       int
