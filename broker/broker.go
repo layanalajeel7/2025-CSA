@@ -10,6 +10,10 @@ import (
 	"uk.ac.bris.cs/gameoflife/stubs"
 )
 
+type Broker struct {
+	currentBoard stubs.GolBoard
+}
+
 // countNeighbours checks 8 neighbours with toroidal wrapping.
 func countNeighbours(world [][]uint8, x, y, w, h int) int {
 	n := 0
@@ -71,8 +75,6 @@ func applyRules(world [][]uint8, turns int) [][]uint8 {
 
 //broker type
 
-type Broker struct{}
-
 // RunGol is the RPC method
 func (b *Broker) RunGol(req stubs.RunGolRequest, res *stubs.RunGolResponse) error {
 
@@ -80,15 +82,34 @@ func (b *Broker) RunGol(req stubs.RunGolRequest, res *stubs.RunGolResponse) erro
 		return errors.New("empty world received by broker")
 	}
 
+	// Compute the final world after all turns
 	finalWorld := applyRules(req.GolBoard.World, req.Turns)
 
-	res.GolBoard = stubs.GolBoard{
+	// SAVE IT INTO THE BROKER so GetAliveCount can read it
+	b.currentBoard = stubs.GolBoard{
 		World:       finalWorld,
 		Width:       req.GolBoard.Width,
 		Height:      req.GolBoard.Height,
 		CurrentTurn: req.Turns,
 	}
 
+	// Return same board to client
+	res.GolBoard = b.currentBoard
+
+	return nil
+}
+
+func (b *Broker) GetAliveCount(req stubs.AliveCountRequest, res *stubs.AliveCountResponse) error {
+	count := 0
+	for y := 0; y < b.currentBoard.Height; y++ {
+		for x := 0; x < b.currentBoard.Width; x++ {
+			if b.currentBoard.World[y][x] == 255 {
+				count++
+			}
+		}
+	}
+
+	res.Count = count
 	return nil
 }
 

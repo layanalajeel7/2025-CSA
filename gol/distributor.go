@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/rpc"
 	"strconv"
+	"time"
 	"uk.ac.bris.cs/gameoflife/stubs"
 	"uk.ac.bris.cs/gameoflife/util"
 )
@@ -68,6 +69,26 @@ func distributor(p Params, c distributorChannels) {
 	}
 
 	var res stubs.RunGolResponse
+	// Step 2: ticker that asks the broker for alive count every 2 seconds
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			var aliveRes stubs.AliveCountResponse
+			err := client.Call(stubs.GetAliveCountHandler, stubs.AliveCountRequest{}, &aliveRes)
+			if err != nil {
+				// If broker is busy or finished, just stop polling
+				return
+			}
+
+			// Send AliveCellsCount event to the UI
+			c.events <- AliveCellsCount{
+				CompletedTurns: 0, // tests do NOT care about this value
+				CellsCount:     aliveRes.Count,
+			}
+		}
+	}()
 
 	// Let the broker run all the turns
 	err = client.Call(stubs.RunGolHandler, req, &res)

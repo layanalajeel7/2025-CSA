@@ -18,3 +18,10 @@ type RunGolRequest struct {
 type RunGolResponse struct {
 	GolBoard GolBoard
 }
+
+const GetAliveCountHandler = "Broker.GetAliveCount"
+
+type AliveCountRequest struct{}
+type AliveCountResponse struct {
+	Count int
+}
