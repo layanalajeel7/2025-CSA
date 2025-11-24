@@ -59,7 +59,7 @@ func runAllBenchmarks() {
 	log.Printf("\n[Bench] END OF BENCHMARKS")
 }
 
-// Wrapper for `go test`
+// Wrapper for go test
 func TestBenchmarks(t *testing.T) {
 	runAllBenchmarks()
 }
