@@ -20,15 +20,19 @@ type distributorChannels struct {
 
 func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
+	// set up world slice (height rows, width columns)
 	world := make([][]uint8, p.ImageHeight)
 	for y := range world {
 		world[y] = make([]uint8, p.ImageWidth)
 	}
 
+	// load initial pgm file using IO goroutine
 	filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
 	c.ioCommand <- ioInput
 	c.ioFilename <- filename
 
+	// fill the world from input
+	// and tell SDL any cells that are alive at time 0
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
 			cell := <-c.ioInput
@@ -39,11 +43,13 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		}
 	}
 
-	// ⭐ VERY IMPORTANT: draw initial frame so SDL is not black
+	// first frame is ready, so send turn 0 complete
 	c.events <- TurnComplete{CompletedTurns: 0}
 
+	// move into executing state
 	c.events <- StateChange{0, Executing}
 
+	// connect to broker (server side)
 	client, err := rpc.Dial("tcp", "localhost:8080")
 	if err != nil {
 		fmt.Println("Could not connect to broker:", err)
@@ -52,6 +58,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		return
 	}
 
+	// package the request for the server
 	req := stubs.RunGolRequest{
 		GolBoard: stubs.GolBoard{
 			World:  world,
@@ -64,11 +71,15 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 	var res stubs.RunGolResponse
 
+	// we need this to stop the ticker when everything ends
 	done := make(chan struct{})
 
+	// every 2 seconds ask broker for alive count
+	// this is needed only because TestAlive checks it
 	go func() {
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
+
 		turn := 0
 
 		for {
@@ -83,7 +94,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 				turn++
 				c.events <- AliveCellsCount{turn, alive.Count}
 
-				// Give SDL a frame every 2s so screen updates
+				// SDL will not draw unless it gets this
 				c.events <- TurnComplete{turn}
 
 			case <-done:
@@ -92,56 +103,59 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		}
 	}()
 
+	// get a fresh client for keypress stuff
+	client, _ = rpc.Dial("tcp", "localhost:8080")
+
+	// keyboard handling (pause, snapshot, quit)
 	go func() {
 		paused := false
+
 		for key := range keyPresses {
 
 			switch key {
 
 			case 's':
-				// snapshot current board from broker
-				_ = client.Call(stubs.RunGolHandler, req, &res)
+				var snapRes stubs.RunGolResponse
+				_ = client.Call(stubs.RunGolHandler, req, &snapRes)
 
 				c.ioCommand <- ioOutput
-				name := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, res.GolBoard.CurrentTurn)
+				name := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, snapRes.GolBoard.CurrentTurn)
 				c.ioFilename <- name
 
+				// write snapshot world out
 				for y := 0; y < p.ImageHeight; y++ {
 					for x := 0; x < p.ImageWidth; x++ {
-						c.ioOutput <- res.GolBoard.World[y][x]
+						c.ioOutput <- snapRes.GolBoard.World[y][x]
 					}
 				}
+
 				c.ioCommand <- ioCheckIdle
 				<-c.ioIdle
 
-				c.events <- ImageOutputComplete{res.GolBoard.CurrentTurn, name}
+				c.events <- ImageOutputComplete{snapRes.GolBoard.CurrentTurn, name}
 
 			case 'q':
-				fmt.Println("Controller quitting…")
-				c.events <- StateChange{res.GolBoard.CurrentTurn, Quitting}
+				// SDL expects events to stop
 				close(c.events)
 				return
 
 			case 'k':
-				fmt.Println("K pressed — shutting down locally")
-				c.events <- StateChange{res.GolBoard.CurrentTurn, Quitting}
 				close(c.events)
 				return
 
 			case 'p':
 				if !paused {
 					paused = true
-					fmt.Println("Paused")
 					c.events <- StateChange{res.GolBoard.CurrentTurn, Paused}
 				} else {
 					paused = false
-					fmt.Println("Continuing")
 					c.events <- StateChange{res.GolBoard.CurrentTurn, Executing}
 				}
 			}
 		}
 	}()
 
+	// actually tell broker to run everything
 	err = client.Call(stubs.RunGolHandler, req, &res)
 	if err != nil {
 		fmt.Println("RPC error:", err)
@@ -150,9 +164,11 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		return
 	}
 
+	// final world returned by server
 	finalWorld := res.GolBoard.World
 	finalTurn := res.GolBoard.CurrentTurn
 
+	// write out final pgm
 	outName := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, finalTurn)
 
 	c.ioCommand <- ioOutput
@@ -169,6 +185,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 	c.events <- ImageOutputComplete{finalTurn, outName}
 
+	// build list of alive cells for tests
 	var alive []util.Cell
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
@@ -178,6 +195,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		}
 	}
 
+	// final events expected by SDL/tests
 	c.events <- FinalTurnComplete{finalTurn, alive}
 	c.events <- StateChange{finalTurn, Quitting}
 
