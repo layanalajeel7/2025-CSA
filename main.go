@@ -56,7 +56,7 @@ func main() {
 	log.Printf("[Main] %-10v %v", "Height", params.ImageHeight)
 	log.Printf("[Main] %-10v %v", "Turns", params.Turns)
 
-	keyPresses := make(chan rune, 10)
+	keyPresses := make(chan rune, 50)
 	events := make(chan gol.Event, 1000)
 
 	go sigint()

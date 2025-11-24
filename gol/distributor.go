@@ -3,6 +3,7 @@ package gol
 import (
 	"fmt"
 	"net/rpc"
+	"runtime"
 	"time"
 
 	"uk.ac.bris.cs/gameoflife/stubs"
@@ -49,6 +50,8 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	// move into executing state
 	c.events <- StateChange{0, Executing}
 
+	currentTurn := 0
+
 	// connect to broker (server side)
 	client, err := rpc.Dial("tcp", "localhost:8080")
 	if err != nil {
@@ -80,7 +83,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
 
-		turn := 0
+		currentTurn := 0
 
 		for {
 			select {
@@ -91,20 +94,15 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 					return
 				}
 
-				turn++
-				c.events <- AliveCellsCount{turn, alive.Count}
-
-				// SDL will not draw unless it gets this
-				c.events <- TurnComplete{turn}
+				currentTurn++
+				c.events <- AliveCellsCount{currentTurn, alive.Count}
+				c.events <- TurnComplete{currentTurn}
 
 			case <-done:
 				return
 			}
 		}
 	}()
-
-	// get a fresh client for keypress stuff
-	client, _ = rpc.Dial("tcp", "localhost:8080")
 
 	// keyboard handling (pause, snapshot, quit)
 	go func() {
@@ -115,24 +113,31 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 			switch key {
 
 			case 's':
-				var snapRes stubs.RunGolResponse
-				_ = client.Call(stubs.RunGolHandler, req, &snapRes)
+				// Whatever world we currently have (initial or final)
+				snapWorld := world
+				snapTurn := 0
 
+				// If the broker has returned, use final world
+				if res.GolBoard.World != nil {
+					snapWorld = res.GolBoard.World
+					snapTurn = res.GolBoard.CurrentTurn
+				}
+
+				// Write snapshot using EXACT same logic as parallel version
 				c.ioCommand <- ioOutput
-				name := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, snapRes.GolBoard.CurrentTurn)
+				name := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, snapTurn)
 				c.ioFilename <- name
 
-				// write snapshot world out
 				for y := 0; y < p.ImageHeight; y++ {
 					for x := 0; x < p.ImageWidth; x++ {
-						c.ioOutput <- snapRes.GolBoard.World[y][x]
+						c.ioOutput <- snapWorld[y][x]
 					}
 				}
 
 				c.ioCommand <- ioCheckIdle
 				<-c.ioIdle
 
-				c.events <- ImageOutputComplete{snapRes.GolBoard.CurrentTurn, name}
+				c.events <- ImageOutputComplete{snapTurn, name}
 
 			case 'q':
 				// SDL expects events to stop
@@ -146,14 +151,16 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 			case 'p':
 				if !paused {
 					paused = true
-					c.events <- StateChange{res.GolBoard.CurrentTurn, Paused}
+					c.events <- StateChange{currentTurn, Paused}
 				} else {
 					paused = false
-					c.events <- StateChange{res.GolBoard.CurrentTurn, Executing}
+					c.events <- StateChange{currentTurn, Executing}
+
 				}
 			}
 		}
 	}()
+	runtime.Gosched() //forces Go to schedule  keypress goroutine before blocking on RPC
 
 	// actually tell broker to run everything
 	err = client.Call(stubs.RunGolHandler, req, &res)
