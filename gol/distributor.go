@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/rpc"
 	"runtime"
+	"sync"
 	"time"
 
 	"uk.ac.bris.cs/gameoflife/stubs"
@@ -53,7 +54,9 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	currentTurn := 0
 
 	// connect to broker (server side)
-	client, err := rpc.Dial("tcp", "localhost:8080")
+	//client, err := rpc.Dial("tcp", "localhost:8080")
+	client, err := rpc.Dial("tcp", "54.204.220.65:8080")
+
 	if err != nil {
 		fmt.Println("Could not connect to broker:", err)
 		c.events <- StateChange{0, Quitting}
@@ -72,7 +75,10 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		Threads: p.Threads,
 	}
 
-	var res stubs.RunGolResponse
+	var (
+		res   stubs.RunGolResponse
+		resMu sync.RWMutex
+	)
 
 	// we need this to stop the ticker when everything ends
 	done := make(chan struct{})
@@ -113,14 +119,18 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 			switch key {
 
 			case 's':
-				// Whatever world we currently have (initial or final)
+				// start from initial world
 				snapWorld := world
 				snapTurn := 0
 
-				// If the broker has returned, use final world
-				if res.GolBoard.World != nil {
-					snapWorld = res.GolBoard.World
-					snapTurn = res.GolBoard.CurrentTurn
+				// if broker has finished, safely read final world
+				resMu.RLock()
+				localRes := res
+				resMu.RUnlock()
+
+				if localRes.GolBoard.World != nil {
+					snapWorld = localRes.GolBoard.World
+					snapTurn = localRes.GolBoard.CurrentTurn
 				}
 
 				// Write snapshot using EXACT same logic as parallel version
@@ -163,13 +173,19 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	runtime.Gosched() //forces Go to schedule  keypress goroutine before blocking on RPC
 
 	// actually tell broker to run everything
-	err = client.Call(stubs.RunGolHandler, req, &res)
+	var tmpRes stubs.RunGolResponse
+	err = client.Call(stubs.RunGolHandler, req, &tmpRes)
 	if err != nil {
 		fmt.Println("RPC error:", err)
 		c.events <- StateChange{0, Quitting}
 		close(c.events)
 		return
 	}
+
+	// store result under mutex so other goroutines see a consistent value
+	resMu.Lock()
+	res = tmpRes
+	resMu.Unlock()
 
 	// final world returned by server
 	finalWorld := res.GolBoard.World

@@ -6,44 +6,46 @@ import (
 	"fmt"
 	"net"
 	"net/rpc"
+	"sync"
 
 	"uk.ac.bris.cs/gameoflife/stubs"
 )
 
-// just storing the initial board + how many times alive count was asked
+// Broker keeps the starting board and how many times we've been asked
+// for an alive count. mu protects these shared fields.
 type Broker struct {
-	initial stubs.GolBoard // turn 0 basically
-	polls   int            // how many GetAliveCount() calls happened
+	mu      sync.Mutex
+	initial stubs.GolBoard
+	polls   int
 }
 
-// literally one GOL step helper
+// stepOnce runs one turn of Game of Life on a 2D world.
 func stepOnce(in [][]uint8, h, w int) [][]uint8 {
-	next := make([][]uint8, h) // new board
+	next := make([][]uint8, h)
 	for y := 0; y < h; y++ {
 		next[y] = make([]uint8, w)
 	}
 
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
+			alive := 0
 
-			alive := 0 // count alive
 			for dy := -1; dy <= 1; dy++ {
 				for dx := -1; dx <= 1; dx++ {
 					if dx == 0 && dy == 0 {
-						continue // skip itself
+						continue
 					}
-					ny := (y + dy + h) % h // wrap around
+					ny := (y + dy + h) % h
 					nx := (x + dx + w) % w
-					if in[ny][nx] == 255 { // alive cell
+					if in[ny][nx] == 255 {
 						alive++
 					}
 				}
 			}
 
 			cell := in[y][x]
-			newVal := cell // default is “stay the same”
+			newVal := cell
 
-			// conway rules again (exact same as spec)
 			if cell == 255 {
 				if alive < 2 || alive > 3 {
 					newVal = 0
@@ -58,42 +60,43 @@ func stepOnce(in [][]uint8, h, w int) [][]uint8 {
 		}
 	}
 
-	return next // return new board after 1 turn
+	return next
 }
 
-// distributor calls this ONCE to run all turns fully, then get final board
+// RunGol runs all the turns once and returns the final board.
 func (b *Broker) RunGol(req stubs.RunGolRequest, res *stubs.RunGolResponse) error {
 	if req.GolBoard.World == nil {
-		return errors.New("empty world received by broker") // just in case
+		return errors.New("empty world received by broker")
 	}
 
 	h := req.GolBoard.Height
 	w := req.GolBoard.Width
 	turns := req.Turns
 
-	// copy initial board so we don't accidentally modify what distributor sent
+	// copy the starting board so we don't mutate the caller's slice
 	initWorld := make([][]uint8, h)
 	for y := 0; y < h; y++ {
 		initWorld[y] = make([]uint8, w)
-		copy(initWorld[y], req.GolBoard.World[y]) // manual deep copy
+		copy(initWorld[y], req.GolBoard.World[y])
 	}
 
-	// store this so GetAliveCount() can rebuild turn 1,2,3 etc
+	// save this board so GetAliveCount can rebuild later turns
+	b.mu.Lock()
 	b.initial = stubs.GolBoard{
 		World:       initWorld,
 		Width:       w,
 		Height:      h,
 		CurrentTurn: 0,
 	}
-	b.polls = 0 // reset alive-count counter every new run
+	b.polls = 0
+	b.mu.Unlock()
 
-	// now actually simulate ALL turns
+	// run all the turns on the broker
 	curr := initWorld
 	for t := 0; t < turns; t++ {
 		curr = stepOnce(curr, h, w)
 	}
 
-	// send back final board + final turn number
 	res.GolBoard = stubs.GolBoard{
 		World:       curr,
 		Width:       w,
@@ -104,35 +107,36 @@ func (b *Broker) RunGol(req stubs.RunGolRequest, res *stubs.RunGolResponse) erro
 	return nil
 }
 
-// This is called repeatedly by distributor’s ticker every 2 seconds.
-// First time = board after 1 turn,
-// second time = after 2 turns,
-// etc.
+// GetAliveCount reconstructs the board after N turns and counts live cells.
+// Each time it's called, we move one step further in time.
 func (b *Broker) GetAliveCount(req stubs.AliveCountRequest, res *stubs.AliveCountResponse) error {
+	b.mu.Lock()
 
 	if b.initial.World == nil {
-		// RunGol hasn't been called yet
+		b.mu.Unlock()
 		res.Count = 0
 		return nil
 	}
 
 	h := b.initial.Height
 	w := b.initial.Width
+	initWorld := b.initial.World
 
-	// start from scratch (turn 0 board)
+	b.polls++
+	steps := b.polls
+
+	b.mu.Unlock()
+
 	curr := make([][]uint8, h)
 	for y := 0; y < h; y++ {
 		curr[y] = make([]uint8, w)
-		copy(curr[y], b.initial.World[y]) // deep copy again
+		copy(curr[y], initWorld[y])
 	}
 
-	b.polls++        // 1st call → 1, 2nd → 2, etc
-	steps := b.polls // how many steps we should simulate
 	for i := 0; i < steps; i++ {
-		curr = stepOnce(curr, h, w) // re-simulate up to that turn
+		curr = stepOnce(curr, h, w)
 	}
 
-	// count alive cells in that reconstructed world
 	count := 0
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
@@ -147,11 +151,10 @@ func (b *Broker) GetAliveCount(req stubs.AliveCountRequest, res *stubs.AliveCoun
 }
 
 func main() {
-
 	port := flag.String("port", "8080", "Port to listen on")
 	flag.Parse()
 
-	_ = rpc.Register(new(Broker)) // register broker as RPC server
+	_ = rpc.Register(new(Broker))
 
 	listener, err := net.Listen("tcp", ":"+*port)
 	if err != nil {
@@ -162,5 +165,5 @@ func main() {
 	fmt.Println("Broker running on port", *port)
 	defer listener.Close()
 
-	rpc.Accept(listener) // just sits and waits for requests
+	rpc.Accept(listener)
 }
