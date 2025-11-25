@@ -22,19 +22,18 @@ type distributorChannels struct {
 
 func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
-	// set up world slice (height rows, width columns)
+	// (height rows, width columns)
 	world := make([][]uint8, p.ImageHeight)
 	for y := range world {
 		world[y] = make([]uint8, p.ImageWidth)
 	}
 
-	// load initial pgm file using IO goroutine
+	// loading initial pgm file using IO goroutine
 	filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
 	c.ioCommand <- ioInput
 	c.ioFilename <- filename
 
-	// fill the world from input
-	// and tell SDL any cells that are alive at time 0
+	// fill the world from input & tell SDL any cells that are alive at time 0
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
 			cell := <-c.ioInput
@@ -45,17 +44,13 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		}
 	}
 
-	// first frame is ready, so send turn 0 complete
 	c.events <- TurnComplete{CompletedTurns: 0}
-
-	// move into executing state
 	c.events <- StateChange{0, Executing}
 
 	currentTurn := 0
 
-	// connect to broker (server side)
-	//client, err := rpc.Dial("tcp", "localhost:8080")
-	client, err := rpc.Dial("tcp", "54.204.220.65:8080")
+	client, err := rpc.Dial("tcp", "localhost:8080")
+	//client, err := rpc.Dial("tcp", "50.17.16.123:8080")
 
 	if err != nil {
 		fmt.Println("Could not connect to broker:", err)
@@ -64,7 +59,6 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		return
 	}
 
-	// package the request for the server
 	req := stubs.RunGolRequest{
 		GolBoard: stubs.GolBoard{
 			World:  world,
@@ -80,11 +74,9 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		resMu sync.RWMutex
 	)
 
-	// we need this to stop the ticker when everything ends
 	done := make(chan struct{})
 
-	// every 2 seconds ask broker for alive count
-	// this is needed only because TestAlive checks it
+	// every 2 secs ask broker for alive count
 	go func() {
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
@@ -110,7 +102,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		}
 	}()
 
-	// keyboard handling (pause, snapshot, quit)
+	// keyboard
 	go func() {
 		paused := false
 
@@ -119,11 +111,9 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 			switch key {
 
 			case 's':
-				// start from initial world
 				snapWorld := world
 				snapTurn := 0
 
-				// if broker has finished, safely read final world
 				resMu.RLock()
 				localRes := res
 				resMu.RUnlock()
@@ -133,7 +123,6 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 					snapTurn = localRes.GolBoard.CurrentTurn
 				}
 
-				// Write snapshot using EXACT same logic as parallel version
 				c.ioCommand <- ioOutput
 				name := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, snapTurn)
 				c.ioFilename <- name
@@ -170,7 +159,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 			}
 		}
 	}()
-	runtime.Gosched() //forces Go to schedule  keypress goroutine before blocking on RPC
+	runtime.Gosched()
 
 	// actually tell broker to run everything
 	var tmpRes stubs.RunGolResponse
@@ -182,16 +171,15 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		return
 	}
 
-	// store result under mutex so other goroutines see a consistent value
 	resMu.Lock()
 	res = tmpRes
 	resMu.Unlock()
 
-	// final world returned by server
+	//return final world to server
 	finalWorld := res.GolBoard.World
 	finalTurn := res.GolBoard.CurrentTurn
 
-	// write out final pgm
+	// writing out final pgm
 	outName := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, finalTurn)
 
 	c.ioCommand <- ioOutput
@@ -208,7 +196,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 	c.events <- ImageOutputComplete{finalTurn, outName}
 
-	// build list of alive cells for tests
+	// building list of alive cells for tests
 	var alive []util.Cell
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
@@ -218,7 +206,6 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		}
 	}
 
-	// final events expected by SDL/tests
 	c.events <- FinalTurnComplete{finalTurn, alive}
 	c.events <- StateChange{finalTurn, Quitting}
 

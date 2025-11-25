@@ -11,8 +11,6 @@ import (
 	"uk.ac.bris.cs/gameoflife/stubs"
 )
 
-// Broker keeps the starting board and how many times we've been asked
-// for an alive count. mu protects these shared fields.
 type Broker struct {
 	mu      sync.Mutex
 	initial stubs.GolBoard
@@ -63,7 +61,6 @@ func stepOnce(in [][]uint8, h, w int) [][]uint8 {
 	return next
 }
 
-// RunGol runs all the turns once and returns the final board.
 func (b *Broker) RunGol(req stubs.RunGolRequest, res *stubs.RunGolResponse) error {
 	if req.GolBoard.World == nil {
 		return errors.New("empty world received by broker")
@@ -73,7 +70,7 @@ func (b *Broker) RunGol(req stubs.RunGolRequest, res *stubs.RunGolResponse) erro
 	w := req.GolBoard.Width
 	turns := req.Turns
 
-	// copy the starting board so we don't mutate the caller's slice
+	// copy the starting board
 	initWorld := make([][]uint8, h)
 	for y := 0; y < h; y++ {
 		initWorld[y] = make([]uint8, w)
@@ -91,7 +88,7 @@ func (b *Broker) RunGol(req stubs.RunGolRequest, res *stubs.RunGolResponse) erro
 	b.polls = 0
 	b.mu.Unlock()
 
-	// run all the turns on the broker
+	// running all the turns on the broker
 	curr := initWorld
 	for t := 0; t < turns; t++ {
 		curr = stepOnce(curr, h, w)
@@ -107,8 +104,7 @@ func (b *Broker) RunGol(req stubs.RunGolRequest, res *stubs.RunGolResponse) erro
 	return nil
 }
 
-// GetAliveCount reconstructs the board after N turns and counts live cells.
-// Each time it's called, we move one step further in time.
+// GetAliveCount reconstructs the board after N turns and counts live cells and each time it's called, we move one step further in time.
 func (b *Broker) GetAliveCount(req stubs.AliveCountRequest, res *stubs.AliveCountResponse) error {
 	b.mu.Lock()
 
